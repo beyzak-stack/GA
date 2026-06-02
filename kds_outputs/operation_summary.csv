@@ -1,0 +1,6 @@
+Operasyon Planı,Mahalle,Araç,Toplanan Atık (L),Toplam Mesafe (km),Tamamlanan Rota Sayısı,Tahmini Operasyon Maliyeti,Ortalama Araç Doluluğu (%)
+Optimum Toplama Planı,Atatürk,AVG,112000,46.04,2,44211.0,76.19
+Optimum Toplama Planı,Atatürk,AZU,51000,18.21,1,17217.0,30.91
+Optimum Toplama Planı,Kuruçeşme,AVG,137900,51.46,2,51967.0,93.81
+Optimum Toplama Planı,Kuruçeşme,AYT,37100,22.99,1,21381.0,96.36
+Optimum Toplama Planı,Kuruçeşme,AZU,114000,25.05,1,24570.0,69.09

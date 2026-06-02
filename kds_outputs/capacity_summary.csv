@@ -1,0 +1,8 @@
+mahalle,vehicle_name,route_no,route_load,service_distance,travel_distance,label,vehicle_id,vehicle_capacity,unused_capacity,capacity_utilization,capacity_utilization_percent,capacity_ok,route_total_distance
+atatürk,AVG,1,71400,3292.0,23084.0,Atatürk AVG,1,73500,2100,0.9714285714285714,97.14,True,26376.0
+atatürk,AVG,2,40600,1703.0,17962.0,Atatürk AVG,1,73500,32900,0.5523809523809524,55.24,True,19665.0
+atatürk,AZU,1,51000,1108.0,17103.0,Atatürk AZU,3,165000,114000,0.3090909090909091,30.91,True,18211.0
+kurucesme,AVG,1,71400,3263.0,21397.0,Kuruçeşme AVG,1,73500,2100,0.9714285714285714,97.14,True,24660.0
+kurucesme,AVG,2,66500,3701.0,23099.0,Kuruçeşme AVG,1,73500,7000,0.9047619047619048,90.48,True,26800.0
+kurucesme,AYT,1,37100,2019.0,20968.0,Kuruçeşme AYT,2,38500,1400,0.9636363636363636,96.36,True,22987.0
+kurucesme,AZU,1,114000,3548.0,21503.0,Kuruçeşme AZU,3,165000,51000,0.6909090909090909,69.09,True,25051.0
