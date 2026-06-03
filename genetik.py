@@ -950,7 +950,7 @@ def analyze_routes(routes, required_edges, vehicle_id, mahalle_adi):
             "service_distance": 0,
             "yol_adi": "-",
             "demand": 0,
-            "cumulative_load": 0
+            "cumulative_load": 0,
         })
 
         for step_num, step in enumerate(route, start=1):
@@ -3206,6 +3206,7 @@ def calculate_municipality_route_cost(
             "serviced_edge": int(row["arc_id"]),
             "service_direction": f"{best_dir[0]}->{best_dir[1]}",
             "service_distance": service_cost,
+            "yol_adi": row.get("yol_adi", row.get("ad", "Yol adı bilgisi yok")),
             "demand": demand,
             "cumulative_load": route_load,
             "mahalle": row["mahalle"]
@@ -3376,6 +3377,43 @@ print("\n===== BELEDİYE MEVCUT ROTA MALİYETİ SENARYOSU =====")
 print(municipality_route_summary_df)
 
 # =====================================================
+# 21.7 BELEDİYE ROTALARINI KML'YE AKTAR
+# =====================================================
+
+belediye_kml_routes = [
+    (
+        municipality_df_ataturk_1,
+        "BELEDIYE_ATATURK_AVG_ROTA_1",
+        "BELEDIYE_Ataturk_Adatepe_Camlikule_AVG_Rota_1.kml"
+    ),
+    (
+        municipality_df_ataturk_2,
+        "BELEDIYE_ATATURK_AVG_ROTA_2",
+        "BELEDIYE_Ataturk_Adatepe_Camlikule_AVG_Rota_2.kml"
+    )
+]
+
+for route_df, route_label, file_name in belediye_kml_routes:
+
+    if route_df is not None and not route_df.empty:
+
+        route_df = route_df.copy()
+
+        # Belediye rota dataframe'inde route_no yoksa ekle
+        if "route_no" not in route_df.columns:
+            route_df["route_no"] = 1
+
+        write_ga_kml(
+            route_df=route_df,
+            vehicle_label=route_label,
+            output_path=os.path.join(kml_folder, file_name)
+        )
+
+        print("Belediye KML oluşturuldu:", file_name)
+
+    else:
+        print("UYARI: Belediye rota dataframe boş:", route_label)
+# =====================================================
 # 22. KDS EXPORT TABLOLARI - OPTİMUM TOPLAMA PLANI
 # =====================================================
 
@@ -3499,6 +3537,16 @@ municipality_route_summary_df.to_csv(
     index=False
 )
 
+# Belediye operasyonu için adım bazlı detay kaydı
+# KDS'de Toplam Mesafe = travel_distance + service_distance olarak buradan okunur.
+municipality_route_details_df.to_csv(
+    os.path.join(kds_output_folder, "municipality_route_details.csv"),
+    index=False
+)
+
+print("\nBelediye rota detayları kaydedildi:")
+print(os.path.join(kds_output_folder, "municipality_route_details.csv"))
+
 print("\n===== KDS OPERASYON ÖZETİ - OPTİMUM TOPLAMA PLANI =====")
 print(operation_summary_df)
 
@@ -3510,6 +3558,20 @@ print("Klasör:", kds_output_folder)
 # =====================================================
 
 container_summary_rows = []
+
+mahalle_gosterim_map = {
+    "atatürk": "Atatürk",
+    "ataturk": "Atatürk",
+    "kuruçeşme": "Kuruçeşme",
+    "kurucesme": "Kuruçeşme"
+}
+
+mahalle_filter_map = {
+    "atatürk": "ataturk",
+    "ataturk": "ataturk",
+    "kuruçeşme": "kurucesme",
+    "kurucesme": "kurucesme"
+}
 
 for mahalle_adi, container_path in container_files.items():
 
@@ -3526,6 +3588,30 @@ for mahalle_adi, container_path in container_files.items():
         .str.strip()
         .str.lower()
     )
+
+    # Mahalle adını normalize et
+    mahalle_key = mahalle_filter_map.get(mahalle_adi, mahalle_adi)
+
+    if "mahalle" in cdf.columns:
+        cdf["mahalle"] = (
+            cdf["mahalle"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .replace({
+                "atatürk": "ataturk",
+                "ataturk": "ataturk",
+                "kuruçeşme": "kurucesme",
+                "kurucesme": "kurucesme",
+                "çamlıkule": "camlikule",
+                "camlikule": "camlikule",
+                "adatepe": "adatepe"
+            })
+        )
+
+        # ASIL DÜZELTME BURADA
+        cdf = cdf[cdf["mahalle"] == mahalle_key].copy()
 
     cdf["adet"] = pd.to_numeric(
         cdf.get("adet", 0),
@@ -3574,7 +3660,7 @@ for mahalle_adi, container_path in container_files.items():
     konteyner_noktasi_sayisi = len(cdf)
 
     container_summary_rows.append({
-        "Mahalle": "Atatürk" if mahalle_adi == "atatürk" else "Kuruçeşme",
+        "Mahalle": mahalle_gosterim_map.get(mahalle_adi, mahalle_adi),
         "Normal Konteyner Sayısı": int(normal_konteyner_sayisi),
         "Yerüstü Konteyner Sayısı": int(yerustu_konteyner_sayisi),
         "Konteyner Noktası Sayısı": int(konteyner_noktasi_sayisi),
@@ -3592,3 +3678,90 @@ neighborhood_info_df.to_csv(
 
 print("\n===== KDS MAHALLE ÖZETİ =====")
 print(neighborhood_info_df)
+# =====================================================
+# BELEDİYE AVG OPERASYONU - MAHALLE BAZLI BİLGİ
+# =====================================================
+
+municipality_service_df = df[
+    (df["avgataturk_sefer1_service"] == 1) |
+    (df["avgataturk_sefer2_service"] == 1)
+].copy()
+
+# Sefer sayısı
+municipality_service_df["sefer_sayisi"] = 0
+municipality_service_df.loc[
+    municipality_service_df["avgataturk_sefer1_service"] == 1,
+    "sefer_sayisi"
+] += 1
+
+municipality_service_df.loc[
+    municipality_service_df["avgataturk_sefer2_service"] == 1,
+    "sefer_sayisi"
+] += 1
+
+# Mahalle bazlı servis özeti
+municipality_neighborhood_info_df = (
+    municipality_service_df
+    .groupby("mahalle")
+    .agg(
+        toplama_yapilacak_sokak_sayisi=("ad", "count"),
+        gunluk_toplama_miktari_litre=("tip1_talep", "sum"),
+        servis_mesafesi_metre=("uzunluk", "sum")
+    )
+    .reset_index()
+)
+
+municipality_neighborhood_info_df["servis_mesafesi_km"] = (
+    municipality_neighborhood_info_df["servis_mesafesi_metre"] / 1000
+).round(2)
+
+sefer_ozet_df = (
+    municipality_service_df
+    .groupby("mahalle")
+    .agg(
+        sefer1_var=("avgataturk_sefer1_service", "max"),
+        sefer2_var=("avgataturk_sefer2_service", "max")
+    )
+    .reset_index()
+)
+
+sefer_ozet_df["sefer_sayisi"] = (
+    sefer_ozet_df["sefer1_var"] + sefer_ozet_df["sefer2_var"]
+)
+
+municipality_neighborhood_info_df = municipality_neighborhood_info_df.merge(
+    sefer_ozet_df[["mahalle", "sefer_sayisi"]],
+    on="mahalle",
+    how="left"
+)
+
+# Mahalle isimlerini düzgün göster
+municipality_neighborhood_info_df["mahalle_gosterim"] = (
+    municipality_neighborhood_info_df["mahalle"]
+    .replace({
+        "ataturk": "Atatürk",
+        "adatepe": "Adatepe",
+        "camlikule": "Çamlıkule"
+    })
+)
+
+# Kolon sırası
+municipality_neighborhood_info_df = municipality_neighborhood_info_df[
+    [
+        "mahalle_gosterim",
+        "toplama_yapilacak_sokak_sayisi",
+        "gunluk_toplama_miktari_litre",
+        "servis_mesafesi_km",
+        "sefer_sayisi"
+    ]
+]
+
+municipality_neighborhood_info_df.to_csv(
+    os.path.join("kds_outputs", "municipality_neighborhood_info.csv"),
+    index=False
+)
+
+print("\nBelediye mahalle bazlı operasyon bilgisi kaydedildi:")
+print(municipality_neighborhood_info_df)
+
+
