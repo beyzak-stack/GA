@@ -5,7 +5,6 @@ Created on Sun May 31 08:16:45 2026
 
 @author: beyzakeskin
 """
-
 import streamlit as st
 import pandas as pd
 import os
@@ -134,6 +133,15 @@ def filter_kml_files(all_files, selected_neighborhood, selected_vehicle, selecte
             if "ataturk" in normalize_text(f)
         ]
 
+    elif selected_neighborhood == "Atatürk + Adatepe + Çamlıkule":
+        filtered = [
+            f for f in filtered
+            if "ataturk" in normalize_text(f)
+            or "adatepe" in normalize_text(f)
+            or "camlikule" in normalize_text(f)
+            or "belediye" in normalize_text(f)
+        ]
+
     elif selected_neighborhood == "Kuruçeşme":
         filtered = [
             f for f in filtered
@@ -142,10 +150,20 @@ def filter_kml_files(all_files, selected_neighborhood, selected_vehicle, selecte
 
     # Araç filtresi
     if selected_vehicle != "Tümü":
-        filtered = [
-            f for f in filtered
-            if f.upper().startswith(selected_vehicle.upper())
-        ]
+
+        if selected_operation_plan == "Mevcut Belediye Operasyonu":
+            # Belediye KML dosyaları genelde BELEDIYE_..._AVG_... şeklinde başlar.
+            # Bu nedenle sadece startswith("AVG") kontrolü yapılırsa dosyalar elenir.
+            filtered = [
+                f for f in filtered
+                if selected_vehicle.upper() in f.upper()
+                or "BELEDIYE" in f.upper()
+            ]
+        else:
+            filtered = [
+                f for f in filtered
+                if f.upper().startswith(selected_vehicle.upper())
+            ]
 
     return sorted(filtered)
 
@@ -436,6 +454,141 @@ def safe_nunique(df, column_name):
     return df[column_name].nunique()
 
 
+def calculate_municipality_total_distance_km(details_df, summary_df=None, fallback_km=0):
+    """
+    Belediye mevcut operasyonu için toplam mesafeyi hesaplar.
+    Öncelik: municipality_route_details.csv içindeki travel_distance + service_distance.
+    Eğer detay dosyası yoksa, uygun özet kolonlarından okumaya çalışır.
+    """
+
+    # 1) En doğru kaynak: detay dosyası
+    if details_df is not None and not details_df.empty:
+        detail_df = details_df.copy()
+
+        if "vehicle_name" in detail_df.columns:
+            detail_df = detail_df[
+                detail_df["vehicle_name"].astype(str).str.upper() == "AVG"
+            ].copy()
+
+        has_travel = "travel_distance" in detail_df.columns
+        has_service = "service_distance" in detail_df.columns
+
+        if has_travel or has_service:
+            travel_m = (
+                pd.to_numeric(detail_df.get("travel_distance", 0), errors="coerce")
+                .fillna(0)
+                .sum()
+            )
+            service_m = (
+                pd.to_numeric(detail_df.get("service_distance", 0), errors="coerce")
+                .fillna(0)
+                .sum()
+            )
+            return round((travel_m + service_m) / 1000, 2), round(travel_m / 1000, 2), round(service_m / 1000, 2), "details"
+
+    # 2) Alternatif kaynak: belediye rota özet dosyası
+    if summary_df is not None and not summary_df.empty:
+        summary = summary_df.copy()
+
+        if "vehicle_name" in summary.columns:
+            summary = summary[
+                summary["vehicle_name"].astype(str).str.upper() == "AVG"
+            ].copy()
+
+        possible_total_cols = [
+            "total_cost",
+            "route_total_distance",
+            "total_distance",
+            "Toplam Mesafe (km)",
+            "Toplam Mesafe",
+            "toplam_mesafe",
+        ]
+
+        for col in possible_total_cols:
+            if col in summary.columns:
+                value = pd.to_numeric(summary[col], errors="coerce").fillna(0).sum()
+
+                # Büyük değerler metre kabul edilir, küçük değerler km kabul edilir.
+                if value > 1000:
+                    value = value / 1000
+
+                return round(value, 2), 0, 0, "summary"
+
+    # 3) Son çare: mahalle bazlı servis mesafesi
+    return round(float(fallback_km), 2), 0, round(float(fallback_km), 2), "fallback"
+
+def filter_municipality_avg_region_df(input_df):
+    """
+    Belediye mevcut operasyonunda sadece Atatürk + Adatepe + Çamlıkule
+    AVG rotalarını alır. START / RETURN / END satırlarını silmez.
+    Böylece toplam mesafe doğru hesaplanır.
+    """
+
+    if input_df is None or input_df.empty:
+        return pd.DataFrame()
+
+    filtered_df = input_df.copy()
+
+    if "vehicle_name" in filtered_df.columns:
+        filtered_df = filtered_df[
+            filtered_df["vehicle_name"].astype(str).str.upper() == "AVG"
+        ].copy()
+
+    # En önemli kısım:
+    # Önce route_label ile Atatürk seferlerini seçiyoruz.
+    # Böylece START, RETURN, END satırları da korunuyor.
+    if "route_label" in filtered_df.columns:
+        label_norm = (
+            filtered_df["route_label"]
+            .astype(str)
+            .apply(normalize_text)
+        )
+
+        filtered_df = filtered_df[
+            label_norm.str.contains("ataturk", na=False)
+            & ~label_norm.str.contains("kurucesme", na=False)
+        ].copy()
+
+    else:
+        allowed_mahalleler = ["ataturk", "adatepe", "camlikule"]
+
+        if "mahalle" in filtered_df.columns:
+            filtered_df = filtered_df[
+                filtered_df["mahalle"]
+                .astype(str)
+                .apply(normalize_text)
+                .isin(allowed_mahalleler)
+            ].copy()
+
+    if "route_no" not in filtered_df.columns:
+        if "route_label" in filtered_df.columns:
+            filtered_df["route_no"] = (
+                filtered_df["route_label"]
+                .astype(str)
+                .str.extract(r"(?:Rota|Sefer)\s*(\d+)")[0]
+            )
+        else:
+            filtered_df["route_no"] = 1
+
+    filtered_df["route_no"] = pd.to_numeric(
+        filtered_df["route_no"],
+        errors="coerce"
+    ).fillna(1).astype(int)
+
+    if "mahalle" not in filtered_df.columns:
+        filtered_df["mahalle"] = "Atatürk + Adatepe + Çamlıkule"
+
+    if "yol_adi" not in filtered_df.columns:
+        filtered_df["yol_adi"] = "Yol adı bilgisi yok"
+    else:
+        filtered_df["yol_adi"] = (
+            filtered_df["yol_adi"]
+            .fillna("Yol adı bilgisi yok")
+            .astype(str)
+            .replace({"": "Yol adı bilgisi yok", "nan": "Yol adı bilgisi yok"})
+        )
+
+    return filtered_df
 # =====================================================
 # DATAFRAME OKUMA
 # =====================================================
@@ -449,6 +602,9 @@ traffic_scenario_comparison_df = load_csv("traffic_scenario_comparison.csv")
 municipality_route_summary_df = load_csv("municipality_route_summary.csv")
 municipality_route_details_df = load_csv("municipality_route_details.csv")
 neighborhood_info_df = load_csv("neighborhood_info.csv")
+municipality_neighborhood_info_df = load_csv(
+    "municipality_neighborhood_info.csv"
+)
 
 # =====================================================
 # SABİT SOL KONTROL PANELİ
@@ -472,7 +628,6 @@ with left_panel:
     selected_alternative_plan = None
 
     if selected_operation_plan == "Alternatif Operasyonlar":
-
         selected_alternative_plan = st.selectbox(
             "Alternatif Plan",
             [
@@ -481,19 +636,51 @@ with left_panel:
             ]
         )
 
+    # -----------------------------
+    # Mahalle seçenekleri
+    # -----------------------------
+    if selected_operation_plan == "Mevcut Belediye Operasyonu":
+        neighborhood_options = [
+            "Tümü",
+            "Atatürk + Adatepe + Çamlıkule",
+            "Kuruçeşme"
+        ]
+    else:
+        neighborhood_options = [
+            "Tümü",
+            "Atatürk",
+            "Kuruçeşme"
+        ]
+
     selected_neighborhood = st.selectbox(
         "Mahalle",
-        ["Tümü", "Atatürk", "Kuruçeşme"]
+        neighborhood_options
     )
 
-    if selected_neighborhood == "Atatürk":
-        vehicle_options = ["Tümü", "AVG", "AZU"]
+    # -----------------------------
+    # Araç seçenekleri
+    # -----------------------------
+    if selected_operation_plan == "Mevcut Belediye Operasyonu":
 
-    elif selected_neighborhood == "Kuruçeşme":
-        vehicle_options = ["Tümü", "AVG", "AYT", "AZU"]
+        if selected_neighborhood == "Atatürk + Adatepe + Çamlıkule":
+            vehicle_options = ["Tümü", "AVG", "AZU"]
+
+        elif selected_neighborhood == "Kuruçeşme":
+            vehicle_options = ["Tümü", "AVG", "AYT", "AZU"]
+
+        else:
+            vehicle_options = ["Tümü", "AVG", "AYT", "AZU"]
 
     else:
-        vehicle_options = ["Tümü", "AVG", "AYT", "AZU"]
+
+        if selected_neighborhood == "Atatürk":
+            vehicle_options = ["Tümü", "AVG", "AZU"]
+
+        elif selected_neighborhood == "Kuruçeşme":
+            vehicle_options = ["Tümü", "AVG", "AYT", "AZU"]
+
+        else:
+            vehicle_options = ["Tümü", "AVG", "AYT", "AZU"]
 
     selected_vehicle = st.selectbox(
         "Araç",
@@ -531,12 +718,17 @@ with left_panel:
         selected_operation_plan=selected_operation_plan
     )
 
+    # Belediye mevcut operasyonunda ilgili KML'ler otomatik seçili gelsin.
+    if selected_operation_plan == "Mevcut Belediye Operasyonu":
+        default_kml_files = filtered_kml_files
+    else:
+        default_kml_files = []
+
     selected_kml_files = st.multiselect(
         "Rota Seçiniz",
         filtered_kml_files,
-        default=[]
+        default=default_kml_files
     )
-
 # =====================================================
 # BAŞLIK
 # =====================================================
@@ -553,7 +745,7 @@ with main_panel:
 
     if show_containers:
 
-        if selected_neighborhood == "Atatürk":
+        if selected_neighborhood in ["Atatürk", "Atatürk + Adatepe + Çamlıkule"]:
 
             if selected_operation_plan == "Mevcut Belediye Operasyonu":
                 allowed_container_mahalleler = [
@@ -623,7 +815,7 @@ with main_panel:
     container_markers_js = json.dumps(container_markers)
 
     # Harita merkezi
-    if selected_neighborhood == "Atatürk":
+    if selected_neighborhood in ["Atatürk", "Atatürk + Adatepe + Çamlıkule"]:
         map_center = {"lat": 38.3712, "lng": 27.1855}
         map_zoom = 15
 
@@ -902,9 +1094,213 @@ with main_panel:
         except:
             return str(value)
     
-    st.subheader("📍 Seçilen Mahalle Bilgileri")
+    if not (
+    selected_operation_plan == "Mevcut Belediye Operasyonu"
+    and selected_neighborhood == "Atatürk + Adatepe + Çamlıkule"
+    and selected_vehicle == "AVG"
+    ):
+     st.subheader("📍 Seçilen Mahalle Bilgileri")
 
-    if selected_neighborhood == "Tümü":
+    st.markdown("""
+    <style>
+    .kpi-card {
+        background-color: #161B22;
+        border: 1px solid #30363D;
+        border-radius: 12px;
+        padding: 12px 16px;
+        min-height: 85px;
+    }
+
+    .kpi-title {
+        font-size: 11px;
+        color: #A1A1AA;
+        margin-bottom: 4px;
+    }
+
+    .kpi-value {
+        font-size: 18px;
+        font-weight: 700;
+        color: #F8FAFC;
+        line-height: 1;
+    }
+
+    .kpi-sub {
+        font-size: 11px;
+        color: #A1A1AA;
+        margin-top: 6px;
+        line-height: 1.5;
+    }
+
+    .kpi-icon {
+        font-size: 14px;
+        margin-bottom: 4px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    if (
+        selected_operation_plan == "Mevcut Belediye Operasyonu"
+        and selected_neighborhood == "Atatürk + Adatepe + Çamlıkule"
+        and selected_vehicle == "AVG"
+    ):
+        st.subheader("📍 Seçilen Operasyon Bölgesi Bilgileri")
+
+        if municipality_neighborhood_info_df.empty:
+            st.info(
+                "Belediye mahalle bazlı operasyon verisi bulunamadı. "
+                "GA kodunu çalıştırıp kds_outputs/municipality_neighborhood_info.csv dosyasını oluşturmalısın."
+            )
+        else:
+            belediye_bolge_df = municipality_neighborhood_info_df.copy()
+
+            # Belediye operasyon bölgesi için konteyner bilgileri
+            belediye_container_markers = container_csv_to_markers(
+                CONTAINER_FILES["Atatürk"],
+                allowed_mahalleler=[
+                    "ataturk",
+                    "adatepe",
+                    "camlikule"
+                ]
+            )
+
+            mahalle_gosterim_map = {
+                "ataturk": "Atatürk",
+                "adatepe": "Adatepe",
+                "camlikule": "Çamlıkule"
+            }
+
+            container_rows = []
+
+            for marker in belediye_container_markers:
+                mahalle_key = normalize_text(marker.get("mahalle", ""))
+
+                try:
+                    adet = int(float(marker.get("adet", 1)))
+                except:
+                    adet = 1
+
+                container_rows.append({
+                    "mahalle": mahalle_key,
+                    "mahalle_gosterim": mahalle_gosterim_map.get(mahalle_key, marker.get("mahalle", "-")),
+                    "adet": adet,
+                    "tip": marker.get("tip", "1")
+                })
+
+            container_summary_df = pd.DataFrame(container_rows)
+
+            if container_summary_df.empty:
+                toplam_normal_konteyner = 0
+                toplam_konteyner_noktasi = 0
+                normal_detay = "Konteyner verisi bulunamadı"
+                nokta_detay = "Konteyner verisi bulunamadı"
+            else:
+                normal_container_df = container_summary_df[
+                    container_summary_df["tip"].astype(str) == "1"
+                ].copy()
+
+                toplam_normal_konteyner = normal_container_df["adet"].sum()
+                toplam_konteyner_noktasi = len(container_summary_df)
+
+                normal_detay_list = []
+                nokta_detay_list = []
+
+                for mahalle_key, mahalle_name in mahalle_gosterim_map.items():
+                    mahalle_normal = normal_container_df[
+                        normal_container_df["mahalle"] == mahalle_key
+                    ]["adet"].sum()
+
+                    mahalle_nokta = container_summary_df[
+                        container_summary_df["mahalle"] == mahalle_key
+                    ].shape[0]
+
+                    normal_detay_list.append(
+                        f"{mahalle_name}: {format_number(mahalle_normal)}"
+                    )
+                    nokta_detay_list.append(
+                        f"{mahalle_name}: {format_number(mahalle_nokta)}"
+                    )
+
+                normal_detay = "<br>".join(normal_detay_list)
+                nokta_detay = "<br>".join(nokta_detay_list)
+
+            toplam_sokak = pd.to_numeric(
+                belediye_bolge_df.get("toplama_yapilacak_sokak_sayisi", 0),
+                errors="coerce"
+            ).fillna(0).sum()
+
+            toplam_atik = pd.to_numeric(
+                belediye_bolge_df.get("gunluk_toplama_miktari_litre", 0),
+                errors="coerce"
+            ).fillna(0).sum()
+
+            toplam_servis_mesafesi = pd.to_numeric(
+                belediye_bolge_df.get("servis_mesafesi_km", 0),
+                errors="coerce"
+            ).fillna(0).sum()
+
+            sefer_sayisi = pd.to_numeric(
+                belediye_bolge_df.get("sefer_sayisi", 0),
+                errors="coerce"
+            ).fillna(0).max()
+
+            def mahalle_detay_satirlari(deger_kolonu, suffix=""):
+                satirlar = []
+                if "mahalle_gosterim" not in belediye_bolge_df.columns:
+                    return ""
+
+                for _, row in belediye_bolge_df.iterrows():
+                    mahalle_adi = row.get("mahalle_gosterim", "-")
+                    deger = row.get(deger_kolonu, 0)
+                    satirlar.append(
+                        f"{mahalle_adi}: {format_number(deger, suffix)}"
+                    )
+
+                return "<br>".join(satirlar)
+
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                st.markdown(
+                    f"""
+                    <div class="kpi-card">
+                        <div class="kpi-icon">🗑️</div>
+                        <div class="kpi-title">Normal Konteyner Adedi</div>
+                        <div class="kpi-value">{format_number(toplam_normal_konteyner)}</div>
+                        <div class="kpi-sub">{normal_detay}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+            with col2:
+                st.markdown(
+                    f"""
+                    <div class="kpi-card">
+                        <div class="kpi-icon">📍</div>
+                        <div class="kpi-title">Konteyner Noktası Sayısı</div>
+                        <div class="kpi-value">{format_number(toplam_konteyner_noktasi)}</div>
+                        <div class="kpi-sub">{nokta_detay}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+            with col3:
+                st.markdown(
+                    f"""
+                    <div class="kpi-card">
+                        <div class="kpi-icon">🛣️</div>
+                        <div class="kpi-title">Toplama Yapılacak Sokak Sayısı</div>
+                        <div class="kpi-value">{format_number(toplam_sokak)}</div>
+                        <div class="kpi-sub">{mahalle_detay_satirlari("toplama_yapilacak_sokak_sayisi")}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+            st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
+
+    elif selected_neighborhood == "Tümü":
         st.info(
             "Mahalle özeti seçilen mahalleye göre gösterilmektedir. "
             "Lütfen Atatürk veya Kuruçeşme mahallesini seçiniz."
@@ -933,36 +1329,6 @@ with main_panel:
             service_street_count = mahalle_row.get("Toplama Yapılacak Sokak Sayısı", "-")
             daily_collection_amount = mahalle_row.get("Günlük Toplama Miktarı (L)", "-")
             service_required_ratio = mahalle_row.get("Servis Gerektiren Yol Oranı (%)", "-")
-
-            st.markdown("""
-    <style>
-    .kpi-card {
-        background-color: #161B22;
-        border: 1px solid #30363D;
-        border-radius: 12px;
-        padding: 12px 16px;
-        min-height: 85px;
-    }
-
-    .kpi-title {
-        font-size: 11px;
-        color: #A1A1AA;
-        margin-bottom: 4px;
-    }
-
-    .kpi-value {
-        font-size: 18px;
-        font-weight: 700;
-        color: #F8FAFC;
-        line-height: 1;
-    }
-
-    .kpi-icon {
-        font-size: 14px;
-        margin-bottom: 4px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
 
             col1, col2, col3 = st.columns(3)
 
@@ -1056,11 +1422,10 @@ with main_panel:
 
     if selected_operation_plan == "Mevcut Belediye Operasyonu":
 
-        tab1, tab2, tab3, tab4 = st.tabs(
+        tab1, tab2, tab4 = st.tabs(
             [
                 "Operasyon Özeti",
                 "Araç / Rota Performansı",
-                "Belediye Rota Verisi",
                 "Rota Detayları"
             ]
         )
@@ -1088,7 +1453,112 @@ with main_panel:
 
         st.write("Seçilen operasyon planına göre mahalle ve araç bazlı özet")
 
-        if not operation_filtered_df.empty:
+        is_municipality_avg_operation = (
+            selected_operation_plan == "Mevcut Belediye Operasyonu"
+            and selected_neighborhood == "Atatürk + Adatepe + Çamlıkule"
+            and selected_vehicle == "AVG"
+        )
+
+        if is_municipality_avg_operation:
+
+            if municipality_neighborhood_info_df.empty:
+
+                st.warning(
+                    "municipality_neighborhood_info.csv bulunamadı veya seçili filtreye uygun kayıt yok."
+                )
+
+            else:
+
+                belediye_bolge_df_tab = municipality_neighborhood_info_df.copy()
+
+                total_waste_tab1 = pd.to_numeric(
+                    belediye_bolge_df_tab.get("gunluk_toplama_miktari_litre", 0),
+                    errors="coerce"
+                ).fillna(0).sum()
+
+                fallback_service_km = pd.to_numeric(
+                    belediye_bolge_df_tab.get("servis_mesafesi_km", 0),
+                    errors="coerce"
+                ).fillna(0).sum()
+
+                municipality_details_for_region_df = filter_municipality_avg_region_df(
+                    municipality_route_details_df
+                )
+
+                (
+                    total_distance_tab1,
+                    total_travel_distance_tab1,
+                    total_service_distance_tab1,
+                    municipality_distance_source
+                ) = calculate_municipality_total_distance_km(
+                    details_df=municipality_details_for_region_df,
+                    summary_df=municipality_route_summary_df,
+                    fallback_km=fallback_service_km
+                )
+
+                if municipality_distance_source == "fallback":
+                    st.warning(
+                        "Toplam mesafe için municipality_route_details.csv bulunamadı/okunamadı. "
+                        "Şimdilik yalnızca servis mesafesi gösteriliyor. GA kodunu tekrar çalıştırıp "
+                        "kds_outputs/municipality_route_details.csv dosyasını oluşturmalısın."
+                    )
+
+                route_count_tab1 = pd.to_numeric(
+                    belediye_bolge_df_tab.get("sefer_sayisi", 0),
+                    errors="coerce"
+                ).fillna(0).max()
+
+                vehicle_count_tab1 = 1
+                best_vehicle = "AVG"
+                best_vehicle_waste = total_waste_tab1
+
+                st.markdown("### 📊 Operasyon Değerlendirmesi")
+
+                c1, c2, c3, c4 = st.columns(4)
+
+                with c1:
+                    st.metric(
+                        "♻️ Toplanan Atık",
+                        f"{total_waste_tab1:,.0f} L"
+                    )
+
+                with c2:
+                    st.metric(
+                        "🛣️ Toplam Mesafe",
+                        f"{total_distance_tab1:,.2f} km"
+                    )
+
+                with c3:
+                    st.metric(
+                        "🚛 Kullanılan Araç",
+                        f"{vehicle_count_tab1}"
+                    )
+
+                with c4:
+                    st.metric(
+                        "📍 Tamamlanan Sefer",
+                        f"{route_count_tab1:,.0f}"
+                    )
+
+                belediye_ozet_df = pd.DataFrame([
+                    {
+                        "Operasyon Planı": "Mevcut Belediye Operasyonu",
+                        "Operasyon Bölgesi": "Atatürk + Adatepe + Çamlıkule",
+                        "Araç": "AVG",
+                        "Toplanan Atık (L)": int(total_waste_tab1),
+                        "Toplam Mesafe (km)": round(total_distance_tab1, 2),
+                        "Tamamlanan Sefer Sayısı": int(route_count_tab1),
+                    }
+                ])
+
+                st.markdown("### 📋 Operasyon Özeti Tablosu")
+
+                st.dataframe(
+                    belediye_ozet_df,
+                    use_container_width=True
+                )
+
+        elif not operation_filtered_df.empty:
 
             if selected_neighborhood == "Tümü":
 
@@ -1169,7 +1639,7 @@ with main_panel:
             st.warning(
                 "operation_summary.csv bulunamadı veya seçili filtreye uygun kayıt yok."
             )
-        
+
     if selected_operation_plan == "Alternatif Operasyonlar":
 
         with tab_alt:
@@ -1232,244 +1702,413 @@ with main_panel:
                 
     with tab2:
 
-        st.write("Araç ve rota bazlı operasyon performansı")
-
-        summary_df, capacity_df = prepare_summary_data(
-            summary_df=multi_run_summary_df,
-            capacity_df=capacity_summary_df,
-            selected_neighborhood=selected_neighborhood,
-            selected_vehicle=selected_vehicle
+        is_municipality_avg_operation = (
+            selected_operation_plan == "Mevcut Belediye Operasyonu"
+            and selected_neighborhood == "Atatürk + Adatepe + Çamlıkule"
+            and selected_vehicle == "AVG"
         )
 
-        if not capacity_df.empty:
+        if is_municipality_avg_operation:
 
-            capacity_display_df = capacity_df.rename(columns={
-                "mahalle": "Mahalle",
-                "vehicle_name": "Araç",
-                "route_no": "Rota No",
-                "route_load": "Toplanan Atık (L)",
-                "service_distance": "Toplama Yapılan Mesafe (m)",
-                "travel_distance": "Geçiş Mesafesi (m)",
-                "vehicle_capacity": "Araç Kapasitesi (L)",
-                "unused_capacity": "Kalan Kapasite (L)",
-                "capacity_utilization_percent": "Araç Doluluk Oranı (%)",
-                "capacity_ok": "Kapasite Uygun",
-                "route_total_distance": "Toplam Mesafe (m)"
-            })
+            st.write("Belediye mevcut operasyonuna ait rota bazlı performans")
 
-            display_columns = [
-                "Mahalle",
-                "Araç",
-                "Rota No",
-                "Toplanan Atık (L)",
-                "Araç Kapasitesi (L)",
-                "Kalan Kapasite (L)",
-                "Araç Doluluk Oranı (%)",
-                "Toplama Yapılan Mesafe (m)",
-                "Geçiş Mesafesi (m)",
-                "Toplam Mesafe (m)",
-                "Kapasite Uygun"
-            ]
+            if municipality_route_details_df.empty:
 
-            capacity_display_df = capacity_display_df[
-                [col for col in display_columns if col in capacity_display_df.columns]
-            ]
-
-            if selected_neighborhood == "Tümü":
-
-                st.info(
-                    "Araç performans grafikleri mahalle bazlı değerlendirme için gösterilmektedir. "
-                    "Lütfen Atatürk veya Kuruçeşme mahallesini seçiniz."
+                st.warning(
+                    "municipality_route_details.csv bulunamadı. "
+                    "GA kodunu çalıştırıp kds_outputs/municipality_route_details.csv dosyasını oluşturmalısın."
                 )
 
             else:
 
-                st.markdown("### Araç Performans Analizi")
+                belediye_perf_df = filter_municipality_avg_region_df(
+                    municipality_route_details_df
+                )
 
-                chart_df = capacity_display_df.copy()
+                if belediye_perf_df.empty:
+                    st.warning(
+                        "Seçili belediye operasyon bölgesi için rota performans kaydı bulunamadı. "
+                        "municipality_route_details.csv içindeki mahalle/route_label alanlarını kontrol etmelisin."
+                    )
+                    st.stop()
 
-                numeric_columns = [
+                belediye_perf_df["sefer_no"] = belediye_perf_df["route_no"]
+
+                belediye_perf_df["sefer_no"] = pd.to_numeric(
+                    belediye_perf_df["sefer_no"],
+                    errors="coerce"
+                ).fillna(1).astype(int)
+
+                numeric_cols = [
+                    "demand",
+                    "travel_distance",
+                    "service_distance"
+                ]
+
+                for col in numeric_cols:
+                    if col in belediye_perf_df.columns:
+                        belediye_perf_df[col] = pd.to_numeric(
+                            belediye_perf_df[col],
+                            errors="coerce"
+                        ).fillna(0)
+                    else:
+                        belediye_perf_df[col] = 0
+
+                if "vehicle_name" not in belediye_perf_df.columns:
+                    belediye_perf_df["vehicle_name"] = "AVG"
+
+                belediye_sefer_df = (
+                    belediye_perf_df
+                    .groupby(["vehicle_name", "sefer_no"], dropna=False)
+                    .agg(
+                        toplanan_atik_litre=("demand", "sum"),
+                        servis_mesafesi_metre=("service_distance", "sum"),
+                        travel_mesafesi_metre=("travel_distance", "sum")
+                    )
+                    .reset_index()
+                )
+
+                belediye_sefer_df["toplam_mesafe_metre"] = (
+                    belediye_sefer_df["servis_mesafesi_metre"]
+                    + belediye_sefer_df["travel_mesafesi_metre"]
+                )
+
+                belediye_sefer_df["toplam_mesafe_km"] = (
+                    belediye_sefer_df["toplam_mesafe_metre"] / 1000
+                ).round(2)
+
+                avg_capacity = 73500
+
+                belediye_sefer_df["arac_kapasitesi_litre"] = avg_capacity
+
+                belediye_sefer_df["kalan_kapasite_litre"] = (
+                    belediye_sefer_df["arac_kapasitesi_litre"]
+                    - belediye_sefer_df["toplanan_atik_litre"]
+                )
+
+                belediye_sefer_df["arac_doluluk_orani"] = (
+                    belediye_sefer_df["toplanan_atik_litre"]
+                    / belediye_sefer_df["arac_kapasitesi_litre"]
+                    * 100
+                ).round(2)
+
+                belediye_sefer_df["verimlilik_l_km"] = (
+                    belediye_sefer_df["toplanan_atik_litre"]
+                    / belediye_sefer_df["toplam_mesafe_km"].replace(0, pd.NA)
+                ).fillna(0).round(2)
+
+                st.markdown("### 📊 Belediye Rota Performans Analizi")
+
+                chart_df = belediye_sefer_df.copy()
+                chart_df["Rota Etiketi"] = (
+                    chart_df["vehicle_name"].astype(str)
+                    + " - Rota "
+                    + chart_df["sefer_no"].astype(int).astype(str)
+                )
+
+                col_g1, col_g2, col_g3 = st.columns(3)
+
+                with col_g1:
+                    st.markdown("**Rota Bazlı Toplanan Atık (L)**")
+                    st.bar_chart(
+                        chart_df.set_index("Rota Etiketi")["toplanan_atik_litre"],
+                        use_container_width=True
+                    )
+
+                with col_g2:
+                    st.markdown("**Toplama / Geçiş Mesafesi (m)**")
+                    mesafe_chart_df = chart_df.rename(columns={
+                        "servis_mesafesi_metre": "Toplama (m)",
+                        "travel_mesafesi_metre": "Geçiş (m)"
+                    })
+                    st.bar_chart(
+                        mesafe_chart_df.set_index("Rota Etiketi")[["Toplama (m)", "Geçiş (m)"]],
+                        use_container_width=True
+                    )
+
+                with col_g3:
+                    st.markdown("**Araç Doluluk Oranı (%)**")
+                    st.bar_chart(
+                        chart_df.set_index("Rota Etiketi")["arac_doluluk_orani"],
+                        use_container_width=True
+                    )
+
+                st.markdown("### 📋 Belediye Araç / Rota Performans Tablosu")
+
+                belediye_display_df = belediye_sefer_df.rename(columns={
+                    "vehicle_name": "Araç",
+                    "sefer_no": "Rota No",
+                    "toplanan_atik_litre": "Toplanan Atık (L)",
+                    "arac_kapasitesi_litre": "Araç Kapasitesi (L)",
+                    "kalan_kapasite_litre": "Kalan Kapasite (L)",
+                    "arac_doluluk_orani": "Araç Doluluk Oranı (%)",
+                    "servis_mesafesi_metre": "Toplama Yapılan Mesafe (m)",
+                    "travel_mesafesi_metre": "Geçiş Mesafesi (m)",
+                    "toplam_mesafe_metre": "Toplam Mesafe (m)",
+                    "toplam_mesafe_km": "Toplam Mesafe (km)"
+                })
+                
+                belediye_display_df["Kapasite Uygun"] = (
+                belediye_display_df["Kalan Kapasite (L)"] >= 0)
+
+                display_columns = [
+                    "Araç",
+                    "Rota No",
                     "Toplanan Atık (L)",
                     "Araç Kapasitesi (L)",
                     "Kalan Kapasite (L)",
                     "Araç Doluluk Oranı (%)",
                     "Toplama Yapılan Mesafe (m)",
                     "Geçiş Mesafesi (m)",
-                    "Toplam Mesafe (m)"
+                    "Toplam Mesafe (m)",
+                    "Kapasite Uygun"
                 ]
 
-                for col in numeric_columns:
-                    if col in chart_df.columns:
-                        chart_df[col] = pd.to_numeric(
-                            chart_df[col],
-                            errors="coerce"
-                        ).fillna(0)
+                belediye_display_df = belediye_display_df[
+                    [col for col in display_columns if col in belediye_display_df.columns]
+                ]
 
-                if not chart_df.empty:
-
-                    st.markdown("**Rota Bazlı Doluluk Oranı (%)**")
-
-                    route_fill_df = chart_df.copy()
-
-                    route_fill_df["Rota Etiketi"] = (
-                        route_fill_df["Araç"].astype(str)
-                        + " - Rota "
-                        + route_fill_df["Rota No"].astype(str)
-                    )
-
-                    st.bar_chart(
-                        route_fill_df.set_index("Rota Etiketi")["Araç Doluluk Oranı (%)"],
-                        use_container_width=True
-                    )
-
-                    col_g1, col_g2, col_g3 = st.columns(3)
-
-                    with col_g1:
-                        st.markdown("**Toplama / Geçiş Mesafesi**")
-
-                        distance_compare_df = chart_df.copy()
-                        distance_compare_df["Toplama (m)"] = distance_compare_df["Toplama Yapılan Mesafe (m)"]
-                        distance_compare_df["Geçiş (m)"] = distance_compare_df["Geçiş Mesafesi (m)"]
-
-                        st.bar_chart(
-                            distance_compare_df.set_index("Araç")[["Toplama (m)", "Geçiş (m)"]],
-                            use_container_width=True
-                        )
-
-                    with col_g2:
-                        st.markdown("**Kapasite Kullanımı (L)**")
-
-                        capacity_compare_df = chart_df.copy()
-                        capacity_compare_df["Kullanılan Kapasite"] = capacity_compare_df["Toplanan Atık (L)"]
-                        capacity_compare_df["Boş Kapasite"] = capacity_compare_df["Kalan Kapasite (L)"]
-
-                        st.bar_chart(
-                            capacity_compare_df.set_index("Araç")[["Kullanılan Kapasite", "Boş Kapasite"]],
-                            use_container_width=True
-                        )
-
-                    with col_g3:
-                        st.markdown("**Verimlilik (L/km)**")
-
-                        efficiency_df = chart_df.copy()
-
-                        efficiency_df["Verimlilik (L/km)"] = (
-                            efficiency_df["Toplanan Atık (L)"] /
-                            (efficiency_df["Toplam Mesafe (m)"] / 1000)
-                        )
-
-                        efficiency_df["Verimlilik (L/km)"] = (
-                            efficiency_df["Verimlilik (L/km)"]
-                            .replace([float("inf"), -float("inf")], 0)
-                            .fillna(0)
-                        )
-
-                        st.bar_chart(
-                            efficiency_df.set_index("Araç")["Verimlilik (L/km)"],
-                            use_container_width=True
-                        )
-
-                    comparison_count = chart_df[["Araç", "Rota No"]].drop_duplicates().shape[0]
-
-                    if comparison_count > 1:
-
-                        st.markdown("### Operasyon Değerlendirmesi")
-
-                        best_fill = chart_df.loc[
-                            chart_df["Araç Doluluk Oranı (%)"].idxmax()
-                        ]
-
-                        best_efficiency = efficiency_df.loc[
-                            efficiency_df["Verimlilik (L/km)"].idxmax()
-                        ]
-
-                        best_collection = chart_df.loc[
-                            chart_df["Toplanan Atık (L)"].idxmax()
-                        ]
-
-                        c1, c2, c3 = st.columns(3)
-
-                        with c1:
-                            st.success(
-                                f"🏆 En Yüksek Doluluk\n\n"
-                                f"{best_fill['Araç']} - "
-                                f"%{best_fill['Araç Doluluk Oranı (%)']:.1f}"
-                            )
-
-                        with c2:
-                            st.info(
-                                f"🚛 En Verimli Araç\n\n"
-                                f"{best_efficiency['Araç']} - "
-                                f"{best_efficiency['Verimlilik (L/km)']:.0f} L/km"
-                            )
-
-                        with c3:
-                            st.warning(
-                                f"📦 En Fazla Toplama\n\n"
-                                f"{best_collection['Araç']} - "
-                                f"{best_collection['Toplanan Atık (L)']:,.0f} L".replace(",", ".")
-                            )
-
-                    else:
-                        st.info(
-                            "Operasyon değerlendirmesi için en az iki rota veya araç gereklidir. "
-                            "Seçili filtrede yalnızca tek rota bulunduğu için karşılaştırma yapılmadı."
-                        )
-
-            st.markdown("### 📋 Araç / Rota Performans Tablosu")
-
-            st.dataframe(
-                capacity_display_df,
-                use_container_width=True
-            )
-
-        else:
-            st.warning("capacity_summary.csv bulunamadı veya seçili filtreye uygun kayıt yok.")
-        
-    if selected_operation_plan == "Mevcut Belediye Operasyonu":
-        with tab3:
-
-            st.write("Belediyeden alınan rota verilerine göre hesaplanan mevcut operasyon bilgileri")
-
-            if not municipality_route_summary_df.empty:
                 st.dataframe(
-                    municipality_route_summary_df,
+                    belediye_display_df,
                     use_container_width=True
                 )
-            else:
-                st.warning("municipality_route_summary.csv bulunamadı.")
 
-            if not municipality_route_details_df.empty:
-                with st.expander("Belediye rota detayları"):
-                    st.dataframe(
-                        municipality_route_details_df,
-                        use_container_width=True
+        else:
+
+            st.write("Araç ve rota bazlı operasyon performansı")
+
+            summary_df, capacity_df = prepare_summary_data(
+                summary_df=multi_run_summary_df,
+                capacity_df=capacity_summary_df,
+                selected_neighborhood=selected_neighborhood,
+                selected_vehicle=selected_vehicle
+            )
+
+            if not capacity_df.empty:
+
+                capacity_display_df = capacity_df.rename(columns={
+                    "mahalle": "Mahalle",
+                    "vehicle_name": "Araç",
+                    "route_no": "Rota No",
+                    "route_load": "Toplanan Atık (L)",
+                    "service_distance": "Toplama Yapılan Mesafe (m)",
+                    "travel_distance": "Geçiş Mesafesi (m)",
+                    "vehicle_capacity": "Araç Kapasitesi (L)",
+                    "unused_capacity": "Kalan Kapasite (L)",
+                    "capacity_utilization_percent": "Araç Doluluk Oranı (%)",
+                    "capacity_ok": "Kapasite Uygun",
+                    "route_total_distance": "Toplam Mesafe (m)"
+                })
+
+                display_columns = [
+                    "Mahalle",
+                    "Araç",
+                    "Rota No",
+                    "Toplanan Atık (L)",
+                    "Araç Kapasitesi (L)",
+                    "Kalan Kapasite (L)",
+                    "Araç Doluluk Oranı (%)",
+                    "Toplama Yapılan Mesafe (m)",
+                    "Geçiş Mesafesi (m)",
+                    "Toplam Mesafe (m)",
+                    "Kapasite Uygun"
+                ]
+
+                capacity_display_df = capacity_display_df[
+                    [col for col in display_columns if col in capacity_display_df.columns]
+                ]
+
+                if selected_neighborhood == "Tümü":
+
+                    st.info(
+                        "Araç performans grafikleri mahalle bazlı değerlendirme için gösterilmektedir. "
+                        "Lütfen Atatürk veya Kuruçeşme mahallesini seçiniz."
                     )
+
+                else:
+
+                    st.markdown("### Araç Performans Analizi")
+
+                    chart_df = capacity_display_df.copy()
+
+                    numeric_columns = [
+                        "Toplanan Atık (L)",
+                        "Araç Kapasitesi (L)",
+                        "Kalan Kapasite (L)",
+                        "Araç Doluluk Oranı (%)",
+                        "Toplama Yapılan Mesafe (m)",
+                        "Geçiş Mesafesi (m)",
+                        "Toplam Mesafe (m)"
+                    ]
+
+                    for col in numeric_columns:
+                        if col in chart_df.columns:
+                            chart_df[col] = pd.to_numeric(
+                                chart_df[col],
+                                errors="coerce"
+                            ).fillna(0)
+
+                    if not chart_df.empty:
+
+                        st.markdown("**Rota Bazlı Doluluk Oranı (%)**")
+
+                        route_fill_df = chart_df.copy()
+
+                        route_fill_df["Rota Etiketi"] = (
+                            route_fill_df["Araç"].astype(str)
+                            + " - Rota "
+                            + route_fill_df["Rota No"].astype(str)
+                        )
+
+                        st.bar_chart(
+                            route_fill_df.set_index("Rota Etiketi")["Araç Doluluk Oranı (%)"],
+                            use_container_width=True
+                        )
+
+                        col_g1, col_g2, col_g3 = st.columns(3)
+
+                        with col_g1:
+                            st.markdown("**Toplama / Geçiş Mesafesi**")
+
+                            distance_compare_df = chart_df.copy()
+                            distance_compare_df["Toplama (m)"] = distance_compare_df["Toplama Yapılan Mesafe (m)"]
+                            distance_compare_df["Geçiş (m)"] = distance_compare_df["Geçiş Mesafesi (m)"]
+
+                            st.bar_chart(
+                                distance_compare_df.set_index("Araç")[["Toplama (m)", "Geçiş (m)"]],
+                                use_container_width=True
+                            )
+
+                        with col_g2:
+                            st.markdown("**Kapasite Kullanımı (L)**")
+
+                            capacity_compare_df = chart_df.copy()
+                            capacity_compare_df["Kullanılan Kapasite"] = capacity_compare_df["Toplanan Atık (L)"]
+                            capacity_compare_df["Boş Kapasite"] = capacity_compare_df["Kalan Kapasite (L)"]
+
+                            st.bar_chart(
+                                capacity_compare_df.set_index("Araç")[["Kullanılan Kapasite", "Boş Kapasite"]],
+                                use_container_width=True
+                            )
+
+                        with col_g3:
+                            st.markdown("**Verimlilik (L/km)**")
+
+                            efficiency_df = chart_df.copy()
+
+                            efficiency_df["Verimlilik (L/km)"] = (
+                                efficiency_df["Toplanan Atık (L)"] /
+                                (efficiency_df["Toplam Mesafe (m)"] / 1000)
+                            )
+
+                            efficiency_df["Verimlilik (L/km)"] = (
+                                efficiency_df["Verimlilik (L/km)"]
+                                .replace([float("inf"), -float("inf")], 0)
+                                .fillna(0)
+                            )
+
+                            st.bar_chart(
+                                efficiency_df.set_index("Araç")["Verimlilik (L/km)"],
+                                use_container_width=True
+                            )
+
+                        comparison_count = chart_df[["Araç", "Rota No"]].drop_duplicates().shape[0]
+
+                        if comparison_count > 1:
+
+                            st.markdown("### Operasyon Değerlendirmesi")
+
+                            best_fill = chart_df.loc[
+                                chart_df["Araç Doluluk Oranı (%)"].idxmax()
+                            ]
+
+                            best_efficiency = efficiency_df.loc[
+                                efficiency_df["Verimlilik (L/km)"].idxmax()
+                            ]
+
+                            best_collection = chart_df.loc[
+                                chart_df["Toplanan Atık (L)"].idxmax()
+                            ]
+
+                            c1, c2, c3 = st.columns(3)
+
+                            with c1:
+                                st.success(
+                                    f"🏆 En Yüksek Doluluk\n\n"
+                                    f"{best_fill['Araç']} - "
+                                    f"%{best_fill['Araç Doluluk Oranı (%)']:.1f}"
+                                )
+
+                            with c2:
+                                st.info(
+                                    f"🚛 En Verimli Araç\n\n"
+                                    f"{best_efficiency['Araç']} - "
+                                    f"{best_efficiency['Verimlilik (L/km)']:.0f} L/km"
+                                )
+
+                            with c3:
+                                st.warning(
+                                    f"📦 En Fazla Toplama\n\n"
+                                    f"{best_collection['Araç']} - "
+                                    f"{best_collection['Toplanan Atık (L)']:,.0f} L".replace(",", ".")
+                                )
+
+                        else:
+                            st.info(
+                                "Operasyon değerlendirmesi için en az iki rota veya araç gereklidir. "
+                                "Seçili filtrede yalnızca tek rota bulunduğu için karşılaştırma yapılmadı."
+                            )
+
+                st.markdown("### 📋 Araç / Rota Performans Tablosu")
+
+                st.dataframe(
+                    capacity_display_df,
+                    use_container_width=True
+                )
+
+            else:
+                st.warning("capacity_summary.csv bulunamadı veya seçili filtreye uygun kayıt yok.")
 
     with tab4:
 
         st.write("Seçilen filtrelere göre oluşturulan toplama rotası adımları")
 
-        route_df = final_route_details_df.copy()
+        is_municipality_avg_operation = (
+            selected_operation_plan == "Mevcut Belediye Operasyonu"
+            and selected_neighborhood == "Atatürk + Adatepe + Çamlıkule"
+            and selected_vehicle == "AVG"
+        )
+
+        if is_municipality_avg_operation:
+            route_df = municipality_route_details_df.copy()
+        else:
+            route_df = final_route_details_df.copy()
 
         if not route_df.empty:
 
-            if selected_neighborhood != "Tümü" and "mahalle" in route_df.columns:
+            if is_municipality_avg_operation:
 
-                key = normalize_text(selected_neighborhood)
+                # Sadece belediye mevcut operasyonundaki Atatürk + Adatepe + Çamlıkule AVG seferlerini al.
+                route_df = filter_municipality_avg_region_df(route_df)
 
-                route_df = route_df[
-                    route_df["mahalle"]
-                    .astype(str)
-                    .apply(normalize_text)
-                    .str.contains(key, na=False)
-                ]
+            else:
 
-            if selected_vehicle != "Tümü" and "vehicle_name" in route_df.columns:
+                if selected_neighborhood != "Tümü" and "mahalle" in route_df.columns:
 
-                route_df = route_df[
-                    route_df["vehicle_name"].astype(str).str.upper() == selected_vehicle
-                ]
+                    key = normalize_text(selected_neighborhood)
+
+                    route_df = route_df[
+                        route_df["mahalle"]
+                        .astype(str)
+                        .apply(normalize_text)
+                        .str.contains(key, na=False)
+                    ]
+
+                if selected_vehicle != "Tümü" and "vehicle_name" in route_df.columns:
+
+                    route_df = route_df[
+                        route_df["vehicle_name"].astype(str).str.upper() == selected_vehicle
+                    ]
 
             # Sadece gerçek servis adımlarını göster
             if "step_no" in route_df.columns:
@@ -1602,4 +2241,9 @@ with main_panel:
                 st.warning("Seçili filtrelere uygun rota detayı bulunamadı.")
 
         else:
-            st.warning("final_route_details.csv bulunamadı.")
+            if selected_operation_plan == "Mevcut Belediye Operasyonu":
+                st.warning(
+                    "municipality_route_details.csv bulunamadı. GA kodunu çalıştırıp belediye rota detaylarını oluşturmalısın."
+                )
+            else:
+                st.warning("final_route_details.csv bulunamadı.")
